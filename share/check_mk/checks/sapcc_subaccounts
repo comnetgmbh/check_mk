@@ -1,0 +1,204 @@
+#!/usr/bin/python
+# -*- encoding: utf-8; py-indent-offset: 4 -*-
+#
+# Copyright (C) 2019 Frank Fegert (fra.nospam.nk@gmx.de)
+#
+# Check_MK check script to determine subaccount information on a SAP
+# Cloud Connector instance. This check has three sub-checks:
+#   - sapcc_subaccounts.info
+#   - sapcc_subaccounts.tunnel
+#   - sapcc_subaccounts.app_conn
+# which work on the same data gathered from the Check_MK special agent
+# for the SAP Cloud Connector.
+#
+# "sapcc_subaccounts.info" just gathers information on each subaccount
+# defined on a SAP Cloud Connector instance. It prints this information
+# in the status details of the check and has no threshold checks or per-
+# formance data.
+#
+# "sapcc_subaccounts.tunnel" gathers status and performance information
+# on the tunnel of each subaccount. It raises an alarm if the status of
+# the tunnel is not "Connected" or if the number of connections are be-
+# low or above of a configured threshold. An alarm is also raised if the
+# tunnel connection is present for a less or more time than a configured
+# threshold.
+# The warning and critical threshold values in number of connections and
+# seconds of connection time can be passed to the check script with the:
+#    sapcc_subaccounts_tunnel_default_levels = {
+#        'conn_num_levels': (0, 0, 30, 40),
+#        'conn_time_levels': (0, 0, 284012568, 315569520),
+#    }
+# configuration option.
+#
+# "sapcc_subaccounts.app_conn" gathers performance information on each
+# application connection of each tunnel. It raises an alarm if the number
+# of connections are below or above of a configured threshold.
+# The warning and critical threshold values in number of connections can
+# be passed to the check script with the:
+#    sapcc_subaccounts_app_conn_default_levels = {
+#        'app_conn_levels': (0, 0, 30, 40)
+#    }
+# configuration option.
+#
+# This check has currently been verified to work with the following
+# versions of the SAP Cloud Connector:
+#   Version: 2.11.2
+#
+# Example output from agent:
+# <<<sapcc_subaccounts:sep(59)>>>
+# subaccounts,abcdefghi,displayName;Display Name
+# subaccounts,abcdefghi,locationID;Location ID
+# subaccounts,abcdefghi,regionHost;hana,ondemand,com
+# subaccounts,abcdefghi,subaccount;abcdefghi
+# subaccounts,abcdefghi,tunnel,applicationConnections,0,connectionCount;5
+# subaccounts,abcdefghi,tunnel,applicationConnections,0,name;abcdefg:abcdefghijk
+# subaccounts,abcdefghi,tunnel,applicationConnections,0,type;JAVA
+# subaccounts,abcdefghi,tunnel,connectedSince;2019-01-17T11:26:02,584 +0100
+# subaccounts,abcdefghi,tunnel,connections;5
+# subaccounts,abcdefghi,tunnel,state;Connected
+# subaccounts,abcdefghi,tunnel,user;P123456
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+# 02110-1301, USA.
+#
+
+
+# The default warning and critical values for the "sapcc_subaccounts.tunnel" check
+factory_settings['sapcc_subaccounts_tunnel_default_levels'] = {
+    'conn_num_levels': (30, 40, 0, 0),
+    'conn_time_levels': (284012568, 315569520, 0, 0),
+}
+
+# The default warning and critical values for the "sapcc_subaccounts.app_conn" check
+factory_settings['sapcc_subaccounts_app_conn_default_levels'] = {
+    'app_conn_levels': (0, 0, 30, 40)
+}
+
+def parse_sapcc_subaccounts(info):
+    pre_parsed = {}
+    parsed = {}
+    for key, value in info:
+        prefix, subaccount_id, subaccount_attr = key.split(',', 2)
+        if subaccount_id in pre_parsed:
+            pre_parsed[subaccount_id][subaccount_attr] = value
+        else:
+            pre_parsed[subaccount_id] = {
+                subaccount_attr: value,
+            }
+
+    # It would be nicer to use the display name as item. However, they do not need to be unique.
+    # We stick with the ID for now
+    #for subaccount_id, subaccount_attrs in pre_parsed.items():
+    #    if 'displayName' in subaccount_attrs:
+    #        parsed[subaccount_attrs['displayName']] = {}
+    #        for k, v in subaccount_attrs.items():
+    #            parsed[subaccount_attrs['displayName']][k] = v
+    return pre_parsed
+
+
+
+def inventory_sapcc_subaccounts(parsed):
+    for subaccount_id, subaccount_attrs in parsed.items():
+        if 'subaccount' in subaccount_attrs:
+            yield subaccount_id, None
+
+
+def check_sapcc_subaccounts_info(item, _no_params, parsed):
+    yield 0, 'Display name: %s, Location ID: %s, Region Host: %s' % (
+            parsed[item].get('displayName', 'n/a'),
+            parsed[item].get('locationID', 'n/a'),
+            parsed[item].get('regionHost', 'n/a'),
+    )
+
+
+
+def check_sapcc_subaccounts_tunnel(item, params, parsed):
+    state = 0
+    if parsed[item].get('tunnel,state') != 'Connected':
+        state = 2
+    yield state, 'Connection state: %s' % parsed[item].get('tunnel,state')
+    yield 0, 'Tunnel user: %s' % parsed[item].get('tunnel,user', 'n/a')
+
+    yield check_levels(
+        int(parsed[item].get('tunnel,connections',0)),
+        'connections',
+        params['conn_num_levels'],
+        human_readable_func=int,
+        infoname = 'Connections')
+    from datetime import datetime
+    if 'tunnel,connectedSince' in parsed[item]:
+        timestring = parsed[item]['tunnel,connectedSince'].split(' ')[0]
+        timestamp = datetime.strptime(timestring, '%Y-%m-%dT%H:%M:%S.%f')
+        time_delta = int((datetime.now() - timestamp).total_seconds())
+        yield 0, 'Connected since: %s' % timestring
+        yield check_levels(
+            time_delta,
+            '',
+            params['conn_time_levels'],
+            human_readable_func=get_age_human_readable,
+            infoname='Connected since',
+        )
+
+
+def check_sapcc_subaccounts_app_conn(item, params, parsed):
+    has_connections = False
+    for attribute in parsed[item]:
+        if attribute.startswith('tunnel,applicationConnection'):
+            has_connections = True
+            break
+    if not has_connections:
+        return 0, 'No active connections'
+
+    infotext = []
+    for attribute, value in parsed[item].items():
+        if attribute.startswith('tunnel,applicationConnections') and attribute.endswith('connectionCount'):
+            infotext.append('Application connections: %s' % value)
+        elif attribute.startswith('tunnel,applicationConnections') and attribute.endswith('name'):
+            infotext.append('Application name: %s' % value)
+        elif attribute.startswith('tunnel,applicationConnections') and attribute.endswith('type'):
+            infotext.append('Application type: %s' % value)
+    return 0, ', '.join(infotext)
+
+
+check_info['sapcc_subaccounts'] = {
+    'parse_function'          : parse_sapcc_subaccounts,
+}
+
+check_info['sapcc_subaccounts.info'] = {
+    'check_function'          : check_sapcc_subaccounts_info,
+    'inventory_function'      : inventory_sapcc_subaccounts,
+    'service_description'     : 'SAP CC Subaccount %s',
+}
+
+check_info['sapcc_subaccounts.tunnel'] = {
+    'check_function'          : check_sapcc_subaccounts_tunnel,
+    'inventory_function'      : inventory_sapcc_subaccounts,
+    'service_description'     : 'SAP CC Subaccount %s Tunnel',
+    'has_perfdata'            : True,
+    'default_levels_variable' : 'sapcc_subaccounts_tunnel_default_levels',
+    'group'                   : 'sapcc_subaccounts',
+}
+
+check_info['sapcc_subaccounts.app_conn'] = {
+    'check_function'          : check_sapcc_subaccounts_app_conn,
+    'inventory_function'      : inventory_sapcc_subaccounts,
+    'service_description'     : 'SAP CC Subaccount %s Application Connections',
+    'has_perfdata'            : True,
+    'default_levels_variable' : 'sapcc_subaccounts_app_conn_default_levels',
+    'group'                   : 'sapcc_subaccounts',
+}
+
+#
+## EOF

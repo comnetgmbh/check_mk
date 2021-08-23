@@ -1,0 +1,66 @@
+#!/usr/bin/python
+# -*- encoding: utf-8; py-indent-offset: 4 -*-
+
+factory_settings['sapcc_certificates_levels'] = {
+    'lower': (2592000, 604800)
+}
+
+
+def parse_sapcc_certificates(info):
+    def get_pre_parsed_key(status, cert_id):
+        return "%s.%s" % (status, cert_id)
+
+    pre_parsed = {}
+    for prefix, value in info:
+        status, cert_id, key = prefix.split(',')
+        if get_pre_parsed_key(status, cert_id) not in pre_parsed:
+            pre_parsed[get_pre_parsed_key(status, cert_id)] = {
+                'status': status,
+                key: value,
+            }
+        else:
+            pre_parsed[get_pre_parsed_key(status,cert_id)][key] = value
+    parsed = {}
+    for _cert_id, cert_data in pre_parsed.items():
+        if cert_data['type'] == 'subaccount':
+            item = 'Subacount %s' % cert_data['subaccountName']
+        else:
+            item = cert_data['type']
+        parsed[item] = cert_data
+    return parsed
+
+
+def inventory_sapcc_certificates(parsed):
+    for item, cert_data in parsed.items():
+        yield item, {}
+
+
+def check_sapcc_certificates(item, params, parsed):
+    if item in parsed:
+
+        valid_until = int(parsed[item]['validTo']) / 1000
+        now = time.time()
+        remaining = valid_until - now
+        yield 0, 'Valid until: %s' % time.strftime('%Y-%m-%d', time.gmtime(valid_until))
+        warn, crit = params.get('lower', (None, None))
+        state = 0
+        if crit and remaining <= crit:
+            state = 2
+        elif warn and remaining <= warn:
+            state = 1
+        if state:
+            yield state, "expires in %s (warn/crit at %s/%s)" % (
+                    get_age_human_readable(remaining),
+                    get_age_human_readable(warn),
+                    get_age_human_readable(crit),
+            )
+
+
+check_info['sapcc_certificates'] = {
+    'parse_function': parse_sapcc_certificates,
+    'inventory_function': inventory_sapcc_certificates,
+    'check_function': check_sapcc_certificates,
+    'service_description': 'SAP CC Certificate %s',
+    'default_levels_variable': 'sapcc_certificates_levels',
+    'group': 'sapcc_certificates',
+}
